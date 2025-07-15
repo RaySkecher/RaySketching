@@ -12,24 +12,15 @@
 #define MAX_BOUNCES 3
 #define FOV 60.0 // Field of View in degrees
 
+// Scene dimensions
+#define NUM_SPHERES 2
+#define NUM_PLANES 6
+
 // Fixed-point math settings
 #define FRAC_BITS 16
 #define ONE (1 << FRAC_BITS)
 #define F(x) ((int32_t)((x) * ONE))
 #define I(x) ((x) >> FRAC_BITS)
-
-// Lookup table for random angles
-#define ANGLE_LUT_SIZE 256
-static int32_t g_cos_lut[ANGLE_LUT_SIZE];
-static int32_t g_sin_lut[ANGLE_LUT_SIZE];
-
-void init_angle_lut() {
-    for (int i = 0; i < ANGLE_LUT_SIZE; ++i) {
-        double angle = 2.0 * M_PI * i / ANGLE_LUT_SIZE;
-        g_cos_lut[i] = F(cos(angle));
-        g_sin_lut[i] = F(sin(angle));
-    }
-}
 
 // Simple vector struct
 typedef struct {
@@ -61,6 +52,43 @@ typedef struct {
     Material material;
 } Plane;
 
+// Structure to hold intersection results
+typedef struct {
+    int32_t t;
+    int hit_type; // 0 for sphere, 1 for plane
+    int hit_index;
+    int hit;      // 1 if an object was hit, 0 otherwise
+} Intersection;
+
+// Lookup table for random angles
+#define ANGLE_LUT_SIZE 256
+static int32_t g_cos_lut[ANGLE_LUT_SIZE];
+static int32_t g_sin_lut[ANGLE_LUT_SIZE];
+
+static const Sphere g_spheres[NUM_SPHERES] = {
+    {.center = {.x = F(-0.6), .y = F(0.0), .z = F(-2.8)}, .radius = F(0.7), .material = {.color = {.x = F(1.0), .y = F(0.7), .z = F(0.2)}, .is_light = 0}}, // Large yellow sphere
+    {.center = {.x = F(0.6), .y = F(-0.5), .z = F(-3.2)}, .radius = F(0.5), .material = {.color = {.x = F(0.5), .y = F(0.5), .z = F(0.5)}, .is_light = 0}}  // Small grey sphere
+};
+
+static const Plane g_planes[NUM_PLANES] = {
+    {.normal = {.x = F(0), .y = F(1), .z = F(0)}, .dist = F(-1), .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},   // Floor
+    // Emissive light panel – slightly below the ceiling so the ceiling itself can receive light
+    {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-2.99), .material = {.color = {.x = F(32.0), .y = F(32.0), .z = F(32.0)}, .is_light = 1}},
+    // Actual ceiling (non-emissive)
+    {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-3),    .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},
+    {.normal = {.x = F(1), .y = F(0), .z = F(0)}, .dist = F(-2), .material = {.color = {.x = F(0.75), .y = F(0.25), .z = F(0.25)}, .is_light = 0}},         // Left wall (red)
+    {.normal = {.x = F(-1), .y = F(0), .z = F(0)}, .dist = F(-2), .material = {.color = {.x = F(0.25), .y = F(0.75), .z = F(0.25)}, .is_light = 0}},        // Right wall (green)
+    {.normal = {.x = F(0), .y = F(0), .z = F(1)}, .dist = F(-5), .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},   // Back wall
+};
+
+void init_angle_lut() {
+    for (int i = 0; i < ANGLE_LUT_SIZE; ++i) {
+        double angle = 2.0 * M_PI * i / ANGLE_LUT_SIZE;
+        g_cos_lut[i] = F(cos(angle));
+        g_sin_lut[i] = F(sin(angle));
+    }
+}
+
 // Fixed-point multiplication
 int32_t mul(int32_t a, int32_t b) {
     return (int32_t)(((int64_t)a * b) >> FRAC_BITS);
@@ -87,9 +115,11 @@ int32_t rand_fp() {
 
 // Forward declarations
 Vec3 random_unit_vector();
-int is_on_light(const Vec3* p);
-int32_t intersect_sphere(const Ray *r, const Sphere *s);
-int32_t intersect_plane(const Ray *r, const Plane *p);
+int is_on_light(Vec3 p);
+int32_t intersect_sphere(Ray r, Sphere s);
+int32_t intersect_plane(Ray r, Plane p);
+Intersection intersect_scene(Ray r);
+Vec3 trace_path(Ray r);
 
 // Fixed-point square root
 int32_t sqrt_fp(int32_t n) {
@@ -131,50 +161,47 @@ Vec3 vec_norm(Vec3 v) {
     return vec_scale(v, div_fp(ONE, len));
 }
 
-// Returns 1 if an object was hit, 0 otherwise.
-int intersect_scene(const Ray *r,
-                    const Sphere* spheres, size_t num_spheres,
-                    const Plane* planes, size_t num_planes,
-                    int32_t* t_out, int* hit_type_out, int* hit_index_out) {
-    
-    int32_t min_t = F(1e9);
-    *hit_type_out = -1;
-    *hit_index_out = -1;
+// Returns an Intersection result.
+Intersection intersect_scene(Ray r) {
+    Intersection result;
+    result.t = F(1e9);
+    result.hit_type = -1;
+    result.hit_index = -1;
+    result.hit = 0;
 
     // Sphere intersection
-    for (size_t i = 0; i < num_spheres; ++i) {
-        int32_t t = intersect_sphere(r, &spheres[i]);
-        if (t < min_t) {
-            min_t = t;
-            *hit_type_out = 0; // 0 for sphere
-            *hit_index_out = (int)i;
+    for (size_t i = 0; i < NUM_SPHERES; ++i) {
+        int32_t t = intersect_sphere(r, g_spheres[i]);
+        if (t < result.t) {
+            result.t = t;
+            result.hit_type = 0; // 0 for sphere
+            result.hit_index = (int)i;
         }
     }
     
     // Plane intersection
-    for (size_t i = 0; i < num_planes; ++i) {
-        int32_t t = intersect_plane(r, &planes[i]);
-        if (t < min_t) {
-            min_t = t;
-            *hit_type_out = 1; // 1 for plane
-            *hit_index_out = (int)i;
+    for (size_t i = 0; i < NUM_PLANES; ++i) {
+        int32_t t = intersect_plane(r, g_planes[i]);
+        if (t < result.t) {
+            result.t = t;
+            result.hit_type = 1; // 1 for plane
+            result.hit_index = (int)i;
         }
     }
     
-    if (*hit_type_out != -1) {
-        *t_out = min_t;
-        return 1;
+    if (result.hit_type != -1) {
+        result.hit = 1;
     }
     
-    return 0;
+    return result;
 }
 
 // Ray-sphere intersection
-int32_t intersect_sphere(const Ray *r, const Sphere *s) {
-    Vec3 oc = vec_sub(r->orig, s->center);
-    int32_t a = vec_dot(r->dir, r->dir);
-    int32_t b = 2 * vec_dot(oc, r->dir);
-    int32_t c = vec_dot(oc, oc) - mul(s->radius, s->radius);
+int32_t intersect_sphere(Ray r, Sphere s) {
+    Vec3 oc = vec_sub(r.orig, s.center);
+    int32_t a = vec_dot(r.dir, r.dir);
+    int32_t b = 2 * vec_dot(oc, r.dir);
+    int32_t c = vec_dot(oc, oc) - mul(s.radius, s.radius);
     int32_t discriminant = mul(b, b) - 4 * mul(a, c);
     if (discriminant < 0) return F(1e9);
     
@@ -188,15 +215,15 @@ int32_t intersect_sphere(const Ray *r, const Sphere *s) {
 }
 
 // Ray-plane intersection
-int32_t intersect_plane(const Ray *r, const Plane *p) {
-    int32_t denom = vec_dot(p->normal, r->dir);
+int32_t intersect_plane(Ray r, Plane p) {
+    int32_t denom = vec_dot(p.normal, r.dir);
     if (denom > -F(0.001) && denom < F(0.001)) return F(1e9); // Parallel
-    int32_t t = div_fp(vec_dot(p->normal, vec_sub(vec_scale(p->normal, p->dist), r->orig)), denom);
+    int32_t t = div_fp(vec_dot(p.normal, vec_sub(vec_scale(p.normal, p.dist), r.orig)), denom);
     if (t <= F(0.001)) return F(1e9);
 
-    if (p->material.is_light) {
-        Vec3 hit_pt = vec_add(r->orig, vec_scale(r->dir, t));
-        if (!is_on_light(&hit_pt)) {
+    if (p.material.is_light) {
+        Vec3 hit_pt = vec_add(r.orig, vec_scale(r.dir, t));
+        if (!is_on_light(hit_pt)) {
             return F(1e9);
         }
     }
@@ -204,37 +231,37 @@ int32_t intersect_plane(const Ray *r, const Plane *p) {
     return t;
 }
 
-Vec3 trace_path(Ray r,
-                const Sphere* spheres, size_t num_spheres,
-                const Plane* planes, size_t num_planes) {
+Vec3 trace_path(Ray r) {
 
     Vec3 path_color = {F(0), F(0), F(0)};
     Vec3 path_attenuation = {ONE, ONE, ONE};
 
     for (int b = 0; b < MAX_BOUNCES; ++b) {
-        int32_t t;
-        int hit_object_type;
-        int hit_object_index;
+        Intersection inter = intersect_scene(r);
 
-        if (!intersect_scene(&r, spheres, num_spheres, planes, num_planes, &t, &hit_object_type, &hit_object_index)) {
+        if (!inter.hit) {
             break; // Ray escaped
         }
+
+        int32_t t = inter.t;
+        int hit_object_type = inter.hit_type;
+        int hit_object_index = inter.hit_index;
 
         Vec3 hit_point = vec_add(r.orig, vec_scale(r.dir, t));
         Vec3 hit_normal;
         Material mat;
 
         if (hit_object_type == 0) { // Sphere
-            mat = spheres[hit_object_index].material;
-            hit_normal = vec_norm(vec_sub(hit_point, spheres[hit_object_index].center));
+            mat = g_spheres[hit_object_index].material;
+            hit_normal = vec_norm(vec_sub(hit_point, g_spheres[hit_object_index].center));
         } else { // Plane
-            mat = planes[hit_object_index].material;
-            hit_normal = planes[hit_object_index].normal;
+            mat = g_planes[hit_object_index].material;
+            hit_normal = g_planes[hit_object_index].normal;
         }
 
         Material surface_mat = mat;
         if (mat.is_light) { // If we hit the ceiling plane
-            if (is_on_light(&hit_point)) {
+            if (is_on_light(hit_point)) {
                 // Only add emission for camera rays to avoid double counting with NEE
                 if (b == 0) {
                     path_color = vec_add(path_color, mat.color);
@@ -255,14 +282,14 @@ Vec3 trace_path(Ray r,
 
             Ray shadow_ray = {vec_add(hit_point, vec_scale(hit_normal, F(0.001))), light_dir};
             int occluded = 0;
-            for (size_t i = 0; i < num_spheres; ++i) {
-                int32_t shadow_t = intersect_sphere(&shadow_ray, &spheres[i]);
+            for (size_t i = 0; i < NUM_SPHERES; ++i) {
+                int32_t shadow_t = intersect_sphere(shadow_ray, g_spheres[i]);
                 if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
             }
             if (!occluded) {
-                for (size_t i = 0; i < num_planes; ++i) {
-                    if (planes[i].material.is_light) continue; // Don't treat the emissive plane as occluder
-                    int32_t shadow_t = intersect_plane(&shadow_ray, &planes[i]);
+                for (size_t i = 0; i < NUM_PLANES; ++i) {
+                    if (g_planes[i].material.is_light) continue; // Don't treat the emissive plane as occluder
+                    int32_t shadow_t = intersect_plane(shadow_ray, g_planes[i]);
                     if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
                 }
             }
@@ -273,7 +300,7 @@ Vec3 trace_path(Ray r,
                 int32_t cos_alpha = vec_dot(light_normal, vec_scale(light_dir, -ONE));
 
                 if (cos_theta > 0 && cos_alpha > 0) {
-                    Material light_mat = planes[1].material;
+                    Material light_mat = g_planes[1].material;
                     int32_t light_area = F(2.0 * 0.4);
                     int32_t geom_term_num = mul(cos_theta, cos_alpha);
                     int32_t geom_term = div_fp(geom_term_num, dist_sq);
@@ -309,8 +336,8 @@ Vec3 trace_path(Ray r,
 }
 
 // Check if a point is on the rectangular light source on the ceiling
-int is_on_light(const Vec3* p) {
-    return (p->x >= F(-1.0) && p->x <= F(1.0) && p->z >= F(-3.2) && p->z <= F(-2.8));
+int is_on_light(Vec3 p) {
+    return (p.x >= F(-1.0) && p.x <= F(1.0) && p.z >= F(-3.2) && p.z <= F(-2.8));
 }
 
 Vec3 random_unit_vector() {
@@ -346,23 +373,7 @@ int main() {
     int height = 512;
     uint8_t *image = (uint8_t *)malloc(width * height * 3);
 
-    // Scene
-    Sphere spheres[] = {
-        {{F(-0.6), F(0.0), F(-2.8)}, F(0.7), {{F(1.0), F(0.7), F(0.2)}, 0}}, // Large yellow sphere
-        {{F(0.6), F(-0.5), F(-3.2)}, F(0.5), {{F(0.5), F(0.5), F(0.5)}, 0}}  // Small grey sphere
-    };
-    Plane planes[] = {
-        {{F(0), F(1), F(0)}, F(-1), {{F(0.75), F(0.75), F(0.75)}, 0}},   // Floor
-        // Emissive light panel – slightly below the ceiling so the ceiling itself can receive light
-        {{F(0), F(-1), F(0)}, F(-2.99), {{F(32.0), F(32.0), F(32.0)}, 1}},
-        // Actual ceiling (non-emissive)
-        {{F(0), F(-1), F(0)}, F(-3),    {{F(0.75), F(0.75), F(0.75)}, 0}},
-        {{F(1), F(0), F(0)}, F(-2), {{F(0.75), F(0.25), F(0.25)}, 0}},         // Left wall (red)
-        {{F(-1), F(0), F(0)}, F(-2), {{F(0.25), F(0.75), F(0.25)}, 0}},        // Right wall (green)
-        {{F(0), F(0), F(1)}, F(-5), {{F(0.75), F(0.75), F(0.75)}, 0}},   // Back wall
-    };
-    const size_t num_spheres = sizeof(spheres) / sizeof(Sphere);
-    const size_t num_planes = sizeof(planes) / sizeof(Plane);
+    // Scene is now defined globally and is constant.
 
     // Camera
     Ray cam = {{F(0), F(0.8), F(2)}, {F(0), F(0), F(-1)}};
@@ -389,7 +400,7 @@ int main() {
                 r.dir.y = F(sy_ndc * fov_scale);
                 r.dir = vec_norm(r.dir);
 
-                pixel_color = vec_add(pixel_color, trace_path(r, spheres, num_spheres, planes, num_planes));
+                pixel_color = vec_add(pixel_color, trace_path(r));
             }
             
             Vec3 color = vec_scale(pixel_color, div_fp(ONE, F(SAMPLES_PER_PIXEL)));
