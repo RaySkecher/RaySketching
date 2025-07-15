@@ -1,9 +1,3 @@
-// A C port of the GLSL shader: https://www.shadertoy.com/view/3dfGR2
-// Original by Reinder Nijhoff 2019
-// Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
-//
-// Translated to C by an AI assistant.
-
 #include <stdio.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -16,6 +10,7 @@
 #define EPSILON 0.1f
 #define SAMPLES 32
 #define MAX_BOUNCES 3
+#define TRIG_LUT_SIZE 256
 
 // Material types
 #define LAMBERTIAN 0
@@ -39,10 +34,16 @@ float vec3_dot(vec3 a, vec3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 vec3 vec3_cross(vec3 a, vec3 b) { return (vec3){a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
 float vec3_length_sq(vec3 a) { return vec3_dot(a, a); }
 
-// An approximation of sqrtf(x) based on a low-error piecewise linear approximation
-// of the sqrt function between powers of two.
-// It implements the formula: G(x) = c1*x*2^(-l/2) + c2*2^(l/2)
-// where l=floor(log2(x)), c1=sqrt(2)-1, c2=2-sqrt(2).
+
+vec2 trig_lut[TRIG_LUT_SIZE];
+
+void initialize_trig_lut() {
+    for (int i = 0; i < TRIG_LUT_SIZE; i++) {
+        float angle = 2.f * PI * (float)i / (float)TRIG_LUT_SIZE;
+        trig_lut[i] = (vec2){cosf(angle), sinf(angle)};
+    }
+}
+
 float sqrtf_approx(float z) {
     if (z == 0.f) return 0.f;
 
@@ -174,8 +175,12 @@ vec3 random_cos_weighted_hemisphere_direction(vec3 n, float* seed) {
     vec3 uu = vec3_normalize(vec3_cross(n, temp));
     vec3 vv = vec3_cross(uu, n);
     float ra = sqrtf_approx(r.y);
-    float rx = ra * cosf(2.f * PI * r.x);
-    float ry = ra * sinf(2.f * PI * r.x);
+
+    int index = ((unsigned int)(r.x * TRIG_LUT_SIZE)) & (TRIG_LUT_SIZE - 1);
+    vec2 sincos = trig_lut[index];
+    float rx = ra * sincos.x;
+    float ry = ra * sincos.y;
+    
     float rz = sqrtf_approx(1.f - r.y);
     vec3 rr = vec3_add(vec3_add(vec3_scale(uu, rx), vec3_scale(vv, ry)), vec3_scale(n, rz));
     return vec3_normalize(rr);
@@ -183,9 +188,12 @@ vec3 random_cos_weighted_hemisphere_direction(vec3 n, float* seed) {
 
 vec2 random_in_unit_disk(float* seed) {
     vec2 h = hash2(seed);
-    h.y *= 2.f * PI;
     float r = sqrtf_approx(h.x);
-    return (vec2){ r * sinf(h.y), r * cosf(h.y) };
+    
+    int index = ((unsigned int)(h.y * TRIG_LUT_SIZE)) & (TRIG_LUT_SIZE - 1);
+    vec2 sincos = trig_lut[index];
+
+    return (vec2){ r * sincos.y, r * sincos.x };
 }
 
 // --- Ray Tracing Structures ---
@@ -195,8 +203,8 @@ typedef struct { int type; vec3 color; } material;
 typedef struct { float t; vec3 p, normal; material mat; } hit_record;
 
 // Primitives
-typedef struct { vec3 center; float radius; } sphere_primitive;
-typedef struct { vec3 center, dimension; } box_primitive;
+typedef struct { vec3 center; float radius; material mat; } sphere_primitive;
+typedef struct { vec3 center, dimension; material mat; } box_primitive;
 
 // --- Material & Intersection ---
 
@@ -211,10 +219,10 @@ vec3 material_emitted(hit_record rec) {
 }
 
 // Intersectors
-bool box_intersect(ray r, float t_min, float t_max, vec3 center, vec3 rad, vec3* normal, float* dist) {
+bool box_hit(box_primitive box, ray r, float t_min, float t_max, hit_record* rec) {
     vec3 m = {fast_inv(r.direction.x), fast_inv(r.direction.y), fast_inv(r.direction.z)};
-    vec3 n = vec3_mul(m, vec3_sub(r.origin, center));
-    vec3 k = vec3_mul((vec3){fabsf(m.x), fabsf(m.y), fabsf(m.z)}, rad);
+    vec3 n = vec3_mul(m, vec3_sub(r.origin, box.center));
+    vec3 k = vec3_mul((vec3){fabsf(m.x), fabsf(m.y), fabsf(m.z)}, box.dimension);
     vec3 t1 = vec3_sub((vec3){-n.x, -n.y, -n.z}, k);
     vec3 t2 = vec3_add((vec3){-n.x, -n.y, -n.z}, k);
     float tN = fmaxf(fmaxf(t1.x, t1.y), t1.z);
@@ -222,10 +230,14 @@ bool box_intersect(ray r, float t_min, float t_max, vec3 center, vec3 rad, vec3*
     if (tN > tF || tF < 0.f) return false;
     float t = tN < t_min ? tF : tN;
     if (t < t_max && t > t_min) {
-        *dist = t;
-        if (t1.x > t1.y && t1.x > t1.z) *normal = (vec3){ r.direction.x > 0.f ? -1.f : 1.f, 0, 0};
-        else if (t1.y > t1.z) *normal = (vec3){0, r.direction.y > 0.f ? -1.f : 1.f, 0};
-        else *normal = (vec3){0, 0, r.direction.z > 0.f ? -1.f : 1.f};
+        rec->t = t;
+        rec->mat = box.mat;
+        vec3 normal;
+        if (t1.x > t1.y && t1.x > t1.z) normal = (vec3){ r.direction.x > 0.f ? -1.f : 1.f, 0, 0};
+        else if (t1.y > t1.z) normal = (vec3){0, r.direction.y > 0.f ? -1.f : 1.f, 0};
+        else normal = (vec3){0, 0, r.direction.z > 0.f ? -1.f : 1.f};
+        rec->normal = normal;
+        rec->p = vec3_add(r.origin, vec3_scale(r.direction, t));
         return true;
     }
     return false;
@@ -253,6 +265,7 @@ bool sphere_hit(sphere_primitive s, ray r, float t_min, float t_max, hit_record*
     rec->p = vec3_add(r.origin, vec3_scale(r.direction, rec->t));
     vec3 outward_normal = vec3_scale(vec3_sub(rec->p, s.center), fast_inv(s.radius));
     rec->normal = outward_normal;
+    rec->mat = s.mat;
 
     return true;
 }
@@ -294,35 +307,6 @@ bool sphere_hit_shadow(sphere_primitive s, ray r, float t_min, float t_max_sq) {
     return false;
 }
 
-
-// --- Camera ---
-
-typedef struct { vec3 origin, lower_left_corner, horizontal, vertical, u, v, w; float lens_radius; } camera;
-
-camera camera_const(vec3 lookfrom, vec3 lookat, vec3 vup, float vfov, float aspect, float aperture, float focus_dist) {
-    camera cam;
-    cam.lens_radius = aperture / 2.f;
-    float theta = vfov * PI / 180.f;
-    float half_height = tanf(theta / 2.f);
-    float half_width = aspect * half_height;
-    cam.origin = lookfrom;
-    cam.w = vec3_normalize(vec3_sub(lookfrom, lookat));
-    cam.u = vec3_normalize(vec3_cross(vup, cam.w));
-    cam.v = vec3_cross(cam.w, cam.u);
-    cam.lower_left_corner = vec3_sub(vec3_sub(vec3_sub(cam.origin, vec3_scale(cam.u, half_width * focus_dist)), vec3_scale(cam.v, half_height * focus_dist)), vec3_scale(cam.w, focus_dist));
-    cam.horizontal = vec3_scale(cam.u, 2.f * half_width * focus_dist);
-    cam.vertical = vec3_scale(cam.v, 2.f * half_height * focus_dist);
-    return cam;
-}
-    
-ray camera_get_ray(camera c, vec2 uv) {
-    vec2 rd = vec2_scale(random_in_unit_disk(&g_seed), c.lens_radius);
-    vec3 offset = vec3_add(vec3_scale(c.u, rd.x), vec3_scale(c.v, rd.y));
-    vec3 origin = vec3_add(c.origin, offset);
-    vec3 target = vec3_add(vec3_add(c.lower_left_corner, vec3_scale(c.horizontal, uv.x)), vec3_scale(c.vertical, uv.y));
-    return (ray){origin, vec3_normalize(vec3_sub(target, origin))};
-}
-
 // --- Scene Definition ---
 
 material mat_red, mat_white, mat_green, mat_light, mat_sphere1, mat_sphere2;
@@ -337,15 +321,15 @@ void initialize_scene() {
     mat_sphere1 = (material){LAMBERTIAN, {0.8f, 0.8f, 0.8f}};
     mat_sphere2 = (material){LAMBERTIAN, {0.8f, 0.6f, 0.2f}};
 
-    box_floor = (box_primitive){{277.5, 0, 277.5}, {277.5, 1, 277.5}};
-    box_ceiling = (box_primitive){{277.5, 555, 277.5}, {277.5, 1, 277.5}};
-    box_back_wall = (box_primitive){{277.5, 277.5, 555}, {277.5, 277.5, 1}};
-    box_right_wall = (box_primitive){{0, 277.5, 277.5}, {1, 277.5, 277.5}};
-    box_left_wall = (box_primitive){{555, 277.5, 277.5}, {1, 277.5, 277.5}};
-    box_light = (box_primitive){{278, 554, 279.5}, {65, 1, 52.5}};
+    box_floor = (box_primitive){{277.5, 0, 277.5}, {277.5, 1, 277.5}, mat_white};
+    box_ceiling = (box_primitive){{277.5, 555, 277.5}, {277.5, 1, 277.5}, mat_white};
+    box_back_wall = (box_primitive){{277.5, 277.5, 555}, {277.5, 277.5, 1}, mat_white};
+    box_right_wall = (box_primitive){{0, 277.5, 277.5}, {1, 277.5, 277.5}, mat_green};
+    box_left_wall = (box_primitive){{555, 277.5, 277.5}, {1, 277.5, 277.5}, mat_red};
+    box_light = (box_primitive){{278, 554, 279.5}, {65, 1, 52.5}, mat_light};
 
-    sphere1 = (sphere_primitive){{190, 90, 190}, 90};
-    sphere2 = (sphere_primitive){{400, 150, 230}, 110};
+    sphere1 = (sphere_primitive){{190, 90, 190}, 90, mat_sphere1};
+    sphere2 = (sphere_primitive){{400, 150, 230}, 110, mat_sphere2};
 }
 
 
@@ -353,37 +337,32 @@ bool world_hit(ray r, float t_min, hit_record* rec) {
     hit_record temp_rec;
     bool hit_anything = false;
     float closest_so_far = MAX_FLOAT;
-    vec3 normal;
-    float dist;
 
-    if (box_intersect(r, t_min, closest_so_far, box_floor.center, box_floor.dimension, &normal, &dist)) {
-        hit_anything = true; closest_so_far = dist; rec->t = dist; rec->normal = normal; rec->mat = mat_white;
+    if (box_hit(box_floor, r, t_min, closest_so_far, &temp_rec)) {
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
-    if (box_intersect(r, t_min, closest_so_far, box_ceiling.center, box_ceiling.dimension, &normal, &dist)) {
-        hit_anything = true; closest_so_far = dist; rec->t = dist; rec->normal = normal; rec->mat = mat_white;
+    if (box_hit(box_ceiling, r, t_min, closest_so_far, &temp_rec)) {
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
-    if (box_intersect(r, t_min, closest_so_far, box_back_wall.center, box_back_wall.dimension, &normal, &dist)) {
-        hit_anything = true; closest_so_far = dist; rec->t = dist; rec->normal = normal; rec->mat = mat_white;
+    if (box_hit(box_back_wall, r, t_min, closest_so_far, &temp_rec)) {
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
-    if (box_intersect(r, t_min, closest_so_far, box_right_wall.center, box_right_wall.dimension, &normal, &dist)) {
-        hit_anything = true; closest_so_far = dist; rec->t = dist; rec->normal = normal; rec->mat = mat_green;
+    if (box_hit(box_right_wall, r, t_min, closest_so_far, &temp_rec)) {
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
-    if (box_intersect(r, t_min, closest_so_far, box_left_wall.center, box_left_wall.dimension, &normal, &dist)) {
-        hit_anything = true; closest_so_far = dist; rec->t = dist; rec->normal = normal; rec->mat = mat_red;
+    if (box_hit(box_left_wall, r, t_min, closest_so_far, &temp_rec)) {
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
-    if (box_intersect(r, t_min, closest_so_far, box_light.center, box_light.dimension, &normal, &dist)) {
-        hit_anything = true; closest_so_far = dist; rec->t = dist; rec->normal = normal; rec->mat = mat_light;
+    if (box_hit(box_light, r, t_min, closest_so_far, &temp_rec)) {
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
     if (sphere_hit(sphere1, r, t_min, closest_so_far, &temp_rec)) {
-        hit_anything = true; closest_so_far = temp_rec.t; rec->t = temp_rec.t; rec->normal = temp_rec.normal; rec->mat = mat_sphere1;
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
     if (sphere_hit(sphere2, r, t_min, closest_so_far, &temp_rec)) {
-        hit_anything = true; closest_so_far = temp_rec.t; rec->t = temp_rec.t; rec->normal = temp_rec.normal; rec->mat = mat_sphere2;
+        hit_anything = true; closest_so_far = temp_rec.t; *rec = temp_rec;
     }
 
-    if(hit_anything) {
-        rec->p = vec3_add(r.origin, vec3_scale(r.direction, rec->t));
-    }
     return hit_anything;
 }
 
@@ -440,9 +419,7 @@ vec3 color(ray r) {
 
         if (vec3_dot(rec.normal, L) > 0.f && L.y > 0.f && !shadow_hit(shadowRay, .01, rr_shadow)) {
             const float light_area = (box_light.dimension.x * box_light.dimension.z) * 4.f;
-            float denom = (PI * rr + EPSILON);
-            float inv_denom = fast_inv_sqrt(denom);
-            inv_denom *= inv_denom;
+            float inv_denom = fast_inv(PI * rr + EPSILON);
             float weight = light_area * L.y * vec3_dot(rec.normal, L) * inv_denom;
             emitted = vec3_add(emitted,
                 vec3_mul(col, vec3_scale((vec3){15.f, 15.f, 15.f}, weight)));
@@ -453,9 +430,39 @@ vec3 color(ray r) {
 }
 
 
+// --- Camera ---
+
+typedef struct { vec3 origin, lower_left_corner, horizontal, vertical, u, v, w; float lens_radius; } camera;
+
+camera camera_const(vec3 lookfrom, vec3 lookat, vec3 vup, float vfov, float aspect, float aperture, float focus_dist) {
+    camera cam;
+    cam.lens_radius = aperture / 2.f;
+    float theta = vfov * PI / 180.f;
+    float half_height = tanf(theta / 2.f);
+    float half_width = aspect * half_height;
+    cam.origin = lookfrom;
+    cam.w = vec3_normalize(vec3_sub(lookfrom, lookat));
+    cam.u = vec3_normalize(vec3_cross(vup, cam.w));
+    cam.v = vec3_cross(cam.w, cam.u);
+    cam.lower_left_corner = vec3_sub(vec3_sub(vec3_sub(cam.origin, vec3_scale(cam.u, half_width * focus_dist)), vec3_scale(cam.v, half_height * focus_dist)), vec3_scale(cam.w, focus_dist));
+    cam.horizontal = vec3_scale(cam.u, 2.f * half_width * focus_dist);
+    cam.vertical = vec3_scale(cam.v, 2.f * half_height * focus_dist);
+    return cam;
+}
+    
+ray camera_get_ray(camera c, vec2 uv) {
+    vec2 rd = vec2_scale(random_in_unit_disk(&g_seed), c.lens_radius);
+    vec3 offset = vec3_add(vec3_scale(c.u, rd.x), vec3_scale(c.v, rd.y));
+    vec3 origin = vec3_add(c.origin, offset);
+    vec3 target = vec3_add(vec3_add(c.lower_left_corner, vec3_scale(c.horizontal, uv.x)), vec3_scale(c.vertical, uv.y));
+    return (ray){origin, vec3_normalize(vec3_sub(target, origin))};
+}
+
+
 // --- Main ---
 
 int main() {
+    initialize_trig_lut();
     initialize_scene();
     int width = 512;
     int height = 512;
