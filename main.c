@@ -102,7 +102,7 @@ int32_t sqrt_fp(int32_t n) {
         root = ONE;
     }
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 3; ++i) {
         int32_t last_root = root;
         if (last_root == 0) { // Should not happen for n > 0
             break;
