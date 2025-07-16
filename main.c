@@ -10,7 +10,7 @@
 // Path tracing settings
 #define SAMPLES_PER_PIXEL 32
 #define MAX_BOUNCES 3
-#define FOV 60.0 // Field of View in degrees
+#define FOV 60.0
 
 // Scene dimensions
 #define NUM_SPHERES 2
@@ -61,9 +61,13 @@ typedef struct {
 } Intersection;
 
 // Lookup table for random angles
-#define ANGLE_LUT_SIZE 256
-static int32_t g_cos_lut[ANGLE_LUT_SIZE];
-static int32_t g_sin_lut[ANGLE_LUT_SIZE];
+#define ANGLE_LUT_SIZE 8
+static const int32_t g_cos_lut[ANGLE_LUT_SIZE] = {
+    65536, 46340, 0, -46340, -65536, -46340, 0, 46340
+};
+static const int32_t g_sin_lut[ANGLE_LUT_SIZE] = {
+    0, 46340, 65536, 46340, 0, -46340, -65536, -46340
+};
 
 static const Sphere g_spheres[NUM_SPHERES] = {
     {.center = {.x = F(-0.6), .y = F(0.0), .z = F(-2.8)}, .radius = F(0.7), .material = {.color = {.x = F(1.0), .y = F(0.7), .z = F(0.2)}, .is_light = 0}}, // Large yellow sphere
@@ -75,19 +79,11 @@ static const Plane g_planes[NUM_PLANES] = {
     // Emissive light panel – slightly below the ceiling so the ceiling itself can receive light
     {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-2.99), .material = {.color = {.x = F(32.0), .y = F(32.0), .z = F(32.0)}, .is_light = 1}},
     // Actual ceiling (non-emissive)
-    {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-3),    .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},
+    {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-3), .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},
     {.normal = {.x = F(1), .y = F(0), .z = F(0)}, .dist = F(-2), .material = {.color = {.x = F(0.75), .y = F(0.25), .z = F(0.25)}, .is_light = 0}},         // Left wall (red)
     {.normal = {.x = F(-1), .y = F(0), .z = F(0)}, .dist = F(-2), .material = {.color = {.x = F(0.25), .y = F(0.75), .z = F(0.25)}, .is_light = 0}},        // Right wall (green)
     {.normal = {.x = F(0), .y = F(0), .z = F(1)}, .dist = F(-5), .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},   // Back wall
 };
-
-void init_angle_lut() {
-    for (int i = 0; i < ANGLE_LUT_SIZE; ++i) {
-        double angle = 2.0 * M_PI * i / ANGLE_LUT_SIZE;
-        g_cos_lut[i] = F(cos(angle));
-        g_sin_lut[i] = F(sin(angle));
-    }
-}
 
 // Fixed-point multiplication
 int32_t mul(int32_t a, int32_t b) {
@@ -99,27 +95,6 @@ int32_t div_fp(int32_t a, int32_t b) {
     if (b == 0) return 0;
     return (int32_t)(((int64_t)a << FRAC_BITS) / b);
 }
-
-// Random number generation
-static uint32_t rand_state = 12345;
-static uint32_t rand_u32() {
-    // xorshift
-    rand_state ^= rand_state << 13;
-    rand_state ^= rand_state >> 17;
-    rand_state ^= rand_state << 5;
-    return rand_state;
-}
-int32_t rand_fp() {
-    return (int32_t)((uint64_t)rand_u32() * ONE >> 32);
-}
-
-// Forward declarations
-Vec3 random_unit_vector();
-int is_on_light(Vec3 p);
-int32_t intersect_sphere(Ray r, Sphere s);
-int32_t intersect_plane(Ray r, Plane p);
-Intersection intersect_scene(Ray r);
-Vec3 trace_path(Ray r);
 
 // Fixed-point square root
 int32_t sqrt_fp(int32_t n) {
@@ -133,18 +108,53 @@ int32_t sqrt_fp(int32_t n) {
     }
 
     for (int i = 0; i < 3; ++i) {
-        int32_t last_root = root;
-        if (last_root == 0) { // Should not happen for n > 0
-            break;
-        }
         root = (root + div_fp(n, root)) >> 1;
-        if (root == last_root) {
-            break;
-        }
     }
 
     return root;
 }
+
+// Random number generation
+static uint32_t rand_state = 12345;
+static uint32_t rand_u32() { // maybe make it generate 3 randon numbers each clock cycle?
+    // xorshift
+    rand_state ^= rand_state << 13;
+    rand_state ^= rand_state >> 17;
+    rand_state ^= rand_state << 5;
+    return rand_state;
+}
+
+int32_t rand_fp() {
+    return (int32_t)((uint64_t)rand_u32() * ONE >> 32);
+}
+
+
+Vec3 random_unit_vector() {
+    // Generate a random angle phi
+    uint32_t r_val = rand_u32();
+    int lut_idx = r_val % ANGLE_LUT_SIZE;
+    int32_t cos_phi = g_cos_lut[lut_idx];
+    int32_t sin_phi = g_sin_lut[lut_idx];
+
+    // Generate a random z-coordinate (cos_theta)
+    int32_t cos_theta = (2 * rand_fp()) - ONE; // Uniform in [-1, 1]
+    int32_t sin_theta = sqrt_fp(ONE - mul(cos_theta, cos_theta));
+
+    // Construct the unit vector
+    Vec3 p;
+    p.x = mul(sin_theta, cos_phi);
+    p.y = mul(sin_theta, sin_phi);
+    p.z = cos_theta;
+    return p;
+}
+
+// Forward declarations
+int is_on_light(Vec3 p);
+int32_t intersect_sphere(Ray r, Sphere s);
+int32_t intersect_plane(Ray r, Plane p);
+Intersection intersect_scene(Ray r);
+Vec3 trace_path(Ray r);
+
 
 // Vector operations
 Vec3 vec_add(Vec3 a, Vec3 b) { return (Vec3){a.x + b.x, a.y + b.y, a.z + b.z}; }
@@ -155,9 +165,7 @@ Vec3 vec_scale(Vec3 v, int32_t s) { return (Vec3){mul(v.x, s), mul(v.y, s), mul(
 int32_t vec_len_sq(Vec3 v) { return vec_dot(v, v); }
 Vec3 vec_norm(Vec3 v) {
     int32_t len_sq = vec_len_sq(v);
-    if (len_sq == 0) return v;
-    int32_t len = sqrt_fp(len_sq);
-    if (len == 0) return v;
+    int32_t len = sqrt_fp(len_sq); // fast inverse sqrt?
     return vec_scale(v, div_fp(ONE, len));
 }
 
@@ -240,7 +248,7 @@ Vec3 trace_path(Ray r) {
         Intersection inter = intersect_scene(r);
 
         if (!inter.hit) {
-            break; // Ray escaped
+            path_attenuation = (Vec3){F(0), F(0), F(0)};
         }
 
         int32_t t = inter.t;
@@ -266,55 +274,53 @@ Vec3 trace_path(Ray r) {
                 if (b == 0) {
                     path_color = vec_add(path_color, mat.color);
                 }
-                break; // Path ends if it hits a light
+                path_attenuation = (Vec3){F(0), F(0), F(0)};
             } else {
                 // Hit ceiling, but outside the light. Treat as grey.
                 surface_mat.color = (Vec3){F(0.2), F(0.2), F(0.2)};
             }
         }
 
-        // Next Event Estimation (direct light sampling)
-        {
-            Vec3 light_point = {F(-1.0) + mul(F(2.0), rand_fp()), F(2.99), F(-3.2) + mul(F(0.4), rand_fp())};
-            Vec3 light_vec = vec_sub(light_point, hit_point);
-            int32_t dist_sq = vec_len_sq(light_vec);
-            Vec3 light_dir = vec_norm(light_vec);
+        // Check if it is in a shadow
+        uint32_t r_val = rand_u32();
+        int32_t rand1 = r_val & 0xFFFF;
+        int32_t rand2 = r_val >> 16;
+        Vec3 light_point = {F(-1.0) + mul(F(2.0), rand1), F(2.99), F(-3.2) + mul(F(0.4), rand2)};
+        Vec3 light_vec = vec_sub(light_point, hit_point);
+        int32_t dist_sq = vec_len_sq(light_vec);
+        Vec3 light_dir = vec_norm(light_vec);
 
-            Ray shadow_ray = {vec_add(hit_point, vec_scale(hit_normal, F(0.001))), light_dir};
-            int occluded = 0;
-            for (size_t i = 0; i < NUM_SPHERES; ++i) {
-                int32_t shadow_t = intersect_sphere(shadow_ray, g_spheres[i]);
-                if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
-            }
-            if (!occluded) {
-                for (size_t i = 0; i < NUM_PLANES; ++i) {
-                    if (g_planes[i].material.is_light) continue; // Don't treat the emissive plane as occluder
-                    int32_t shadow_t = intersect_plane(shadow_ray, g_planes[i]);
-                    if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
-                }
-            }
+        Ray shadow_ray = {vec_add(hit_point, vec_scale(hit_normal, F(0.01))), light_dir};
+        int occluded = 0;
+        for (size_t i = 0; i < NUM_SPHERES; ++i) {
+            int32_t shadow_t = intersect_sphere(shadow_ray, g_spheres[i]);
+            if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
+        }
+        for (size_t i = 0; i < NUM_PLANES; ++i) {
+            if (g_planes[i].material.is_light) continue; // Don't treat the emissive plane as occluder
+            int32_t shadow_t = intersect_plane(shadow_ray, g_planes[i]);
+            if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
+        }
 
-            if (!occluded) {
-                int32_t cos_theta = vec_dot(hit_normal, light_dir);
-                Vec3 light_normal = {0, -ONE, 0}; // Light surface normal points down into the box
-                int32_t cos_alpha = vec_dot(light_normal, vec_scale(light_dir, -ONE));
+        if (!occluded) {
+            // if it is NOT in a shadow, calculate the direct light contribution
+            int32_t cos_theta = vec_dot(hit_normal, light_dir);
+            Vec3 light_normal = {0, -ONE, 0}; // Light surface normal points down into the box
+            int32_t cos_alpha = vec_dot(light_normal, vec_scale(light_dir, -ONE));
 
-                if (cos_theta > 0 && cos_alpha > 0) {
-                    Material light_mat = g_planes[1].material;
-                    int32_t light_area = F(2.0 * 0.4);
-                    int32_t geom_term_num = mul(cos_theta, cos_alpha);
-                    int32_t geom_term = div_fp(geom_term_num, dist_sq);
+            if (cos_theta > 0 && cos_alpha > 0) { // if the light and surface are facing each other
+                Material light_mat = g_planes[1].material;
+                int32_t light_area = F(2.0 * 0.4);
+                int32_t geom_term_num = mul(cos_theta, cos_alpha);
+                int32_t geom_term = div_fp(geom_term_num, dist_sq);
 
-                    if (geom_term > 0) {
-                        Vec3 direct_light = vec_mul(path_attenuation, surface_mat.color);
-                        direct_light = vec_mul(direct_light, light_mat.color);
-                        direct_light = vec_scale(direct_light, geom_term);
-                        direct_light = vec_scale(direct_light, light_area);
-                        // Divide by PI for diffuse BRDF
-                        direct_light = vec_scale(direct_light, F(0.3183)); 
-                        path_color = vec_add(path_color, direct_light);
-                    }
-                }
+                Vec3 direct_light = vec_mul(path_attenuation, surface_mat.color);
+                direct_light = vec_mul(direct_light, light_mat.color);
+                direct_light = vec_scale(direct_light, geom_term);
+                direct_light = vec_scale(direct_light, light_area);
+                // Divide by PI for diffuse BRDF
+                direct_light = vec_scale(direct_light, F(0.3183)); 
+                path_color = vec_add(path_color, direct_light);
             }
         }
 
@@ -324,11 +330,8 @@ Vec3 trace_path(Ray r) {
         // New random direction for bounced ray
         Vec3 random_dir = random_unit_vector();
         Vec3 bounce_dir = vec_add(hit_normal, random_dir);
-        if (vec_len_sq(bounce_dir) == 0) {
-            bounce_dir = hit_normal;
-        }
 
-        r.orig = vec_add(hit_point, vec_scale(hit_normal, F(0.001)));
+        r.orig = vec_add(hit_point, vec_scale(hit_normal, F(0.01)));
         r.dir = vec_norm(bounce_dir);
     }
 
@@ -340,24 +343,8 @@ int is_on_light(Vec3 p) {
     return (p.x >= F(-1.0) && p.x <= F(1.0) && p.z >= F(-3.2) && p.z <= F(-2.8));
 }
 
-Vec3 random_unit_vector() {
-    // Generate a random angle phi
-    uint32_t r_val = rand_u32();
-    int lut_idx = r_val % ANGLE_LUT_SIZE;
-    int32_t cos_phi = g_cos_lut[lut_idx];
-    int32_t sin_phi = g_sin_lut[lut_idx];
 
-    // Generate a random z-coordinate (cos_theta)
-    int32_t cos_theta = (2 * rand_fp()) - ONE; // Uniform in [-1, 1]
-    int32_t sin_theta = sqrt_fp(ONE - mul(cos_theta, cos_theta));
-
-    // Construct the unit vector
-    Vec3 p;
-    p.x = mul(sin_theta, cos_phi);
-    p.y = mul(sin_theta, sin_phi);
-    p.z = cos_theta;
-    return p;
-}
+// EVERYTHING BELOW HERE WILL BE IMPLEMENTED IN THE HOST MACHINE
 
 // PPM image output
 void write_ppm(const char *filename, int width, int height, const uint8_t *data) {
@@ -368,7 +355,6 @@ void write_ppm(const char *filename, int width, int height, const uint8_t *data)
 }
 
 int main() {
-    init_angle_lut();
     int width = 512;
     int height = 512;
     uint8_t *image = (uint8_t *)malloc(width * height * 3);
