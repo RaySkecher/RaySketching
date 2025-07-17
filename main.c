@@ -93,6 +93,7 @@ int32_t mul(int32_t a, int32_t b) {
 // Fixed-point division
 int32_t div_fp(int32_t a, int32_t b) {
     if (b == 0) return 0;
+    //int32_t X0 = 
     return (int32_t)(((int64_t)a << FRAC_BITS) / b);
 }
 
@@ -112,6 +113,17 @@ int32_t sqrt_fp(int32_t n) {
     }
 
     return root;
+}
+
+// Fast inverse square root for fixed-point numbers
+static inline int32_t inv_sqrt_fp(int32_t x) {
+    if (x <= 0) return 0;
+    float x_f = (float)x / (float)ONE;
+    union { float f; uint32_t i; } u;
+    u.f = x_f;
+    u.i = 0x5f3759df - (u.i >> 1);
+    u.f = u.f * (1.5f - 0.5f * x_f * u.f * u.f);
+    return (int32_t)(u.f * (float)ONE);
 }
 
 // Random number generation
@@ -165,8 +177,8 @@ Vec3 vec_scale(Vec3 v, int32_t s) { return (Vec3){mul(v.x, s), mul(v.y, s), mul(
 int32_t vec_len_sq(Vec3 v) { return vec_dot(v, v); }
 Vec3 vec_norm(Vec3 v) {
     int32_t len_sq = vec_len_sq(v);
-    int32_t len = sqrt_fp(len_sq); // fast inverse sqrt?
-    return vec_scale(v, div_fp(ONE, len));
+    int32_t inv_len = inv_sqrt_fp(len_sq);
+    return vec_scale(v, inv_len);
 }
 
 // Returns an Intersection result.
