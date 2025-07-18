@@ -60,13 +60,39 @@ typedef struct {
     int hit;      // 1 if an object was hit, 0 otherwise
 } Intersection;
 
-// Lookup table for random angles
-#define ANGLE_LUT_SIZE 8
-static const int32_t g_cos_lut[ANGLE_LUT_SIZE] = {
-    65536, 46340, 0, -46340, -65536, -46340, 0, 46340
-};
-static const int32_t g_sin_lut[ANGLE_LUT_SIZE] = {
-    0, 46340, 65536, 46340, 0, -46340, -65536, -46340
+#define UNIT_VECTOR_LUT_SIZE 64
+static const Vec3 g_unit_vector_lut[UNIT_VECTOR_LUT_SIZE] = {
+    {.x = 37813, .y = 37813, .z = 37813}, {.x = -37813, .y = -37813, .z = -37813},
+    {.x = 53475, .y = 0, .z = 37813}, {.x = -53475, .y = 0, .z = -37813},
+    {.x = 0, .y = 53475, .z = 37813}, {.x = 0, .y = -53475, .z = -37813},
+    {.x = 37813, .y = 53475, .z = 0}, {.x = -37813, .y = -53475, .z = 0},
+    {.x = 65536, .y = 0, .z = 0}, {.x = -65536, .y = 0, .z = 0},
+    {.x = 0, .y = 65536, .z = 0}, {.x = 0, .y = -65536, .z = 0},
+    {.x = 0, .y = 0, .z = 65536}, {.x = 0, .y = 0, .z = -65536},
+    {.x = 46340, .y = 46340, .z = 0}, {.x = -46340, .y = -46340, .z = 0},
+    {.x = 46340, .y = 0, .z = 46340}, {.x = -46340, .y = 0, .z = -46340},
+    {.x = 0, .y = 46340, .z = 46340}, {.x = 0, .y = -46340, .z = -46340},
+    {.x = 25881, .y = 25881, .z = 57925}, {.x = -25881, .y = -25881, .z = -57925},
+    {.x = 25881, .y = 57925, .z = 25881}, {.x = -25881, .y = -57925, .z = -25881},
+    {.x = 57925, .y = 25881, .z = 25881}, {.x = -57925, .y = -25881, .z = -25881},
+    {.x = 32768, .y = 32768, .z = 46340}, {.x = -32768, .y = -32768, .z = -46340},
+    {.x = 32768, .y = 46340, .z = 32768}, {.x = -32768, .y = -46340, .z = -32768},
+    {.x = 46340, .y = 32768, .z = 32768}, {.x = -46340, .y = -32768, .z = -32768},
+    {.x = 12345, .y = 64543, .z = 10000}, {.x = -12345, .y = -64543, .z = -10000},
+    {.x = 64543, .y = 10000, .z = 12345}, {.x = -64543, .y = -10000, .z = -12345},
+    {.x = 10000, .y = 12345, .z = 64543}, {.x = -10000, .y = -12345, .z = -64543},
+    {.x = 40000, .y = 50000, .z = 1234}, {.x = -40000, .y = -50000, .z = -1234},
+    {.x = 50000, .y = 1234, .z = 40000}, {.x = -50000, .y = -1234, .z = -40000},
+    {.x = 1234, .y = 40000, .z = 50000}, {.x = -1234, .y = -40000, .z = -50000},
+    {.x = 18000, .y = 18000, .z = 60963}, {.x = -18000, .y = -18000, .z = -60963},
+    {.x = 18000, .y = 60963, .z = 18000}, {.x = -18000, .y = -60963, .z = -18000},
+    {.x = 60963, .y = 18000, .z = 18000}, {.x = -60963, .y = -18000, .z = -18000},
+    {.x = 55555, .y = 22222, .z = 25000}, {.x = -55555, .y = -22222, .z = -25000},
+    {.x = 22222, .y = 25000, .z = 55555}, {.x = -22222, .y = -25000, .z = -55555},
+    {.x = 25000, .y = 55555, .z = 22222}, {.x = -25000, .y = -55555, .z = -22222},
+    {.x = 61234, .y = 12345, .z = 20000}, {.x = -61234, .y = -12345, .z = -20000},
+    {.x = 12345, .y = 20000, .z = 61234}, {.x = -12345, .y = -20000, .z = -61234},
+    {.x = 20000, .y = 61234, .z = 12345}, {.x = -20000, .y = -61234, .z = -12345}
 };
 
 static const Sphere g_spheres[NUM_SPHERES] = {
@@ -97,23 +123,6 @@ int32_t div_fp(int32_t a, int32_t b) {
     return (int32_t)(((int64_t)a << FRAC_BITS) / b);
 }
 
-// Fixed-point square root
-int32_t sqrt_fp(int32_t n) {
-    if (n <= 0) {
-        return 0;
-    }
-
-    int32_t root = n;
-    if (root < ONE) {
-        root = ONE;
-    }
-
-    for (int i = 0; i < 3; ++i) {
-        root = (root + div_fp(n, root)) >> 1;
-    }
-
-    return root;
-}
 
 // Fast inverse square root for fixed-point numbers
 static inline int32_t inv_sqrt_fp(int32_t x) {
@@ -124,6 +133,12 @@ static inline int32_t inv_sqrt_fp(int32_t x) {
     u.i = 0x5f3759df - (u.i >> 1);
     u.f = u.f * (1.5f - 0.5f * x_f * u.f * u.f);
     return (int32_t)(u.f * (float)ONE);
+}
+
+// Fixed-point square root
+int32_t sqrt_fp(int32_t n) {
+    if (n <= 0) return 0;
+    return mul(n, inv_sqrt_fp(n));
 }
 
 // Random number generation
@@ -142,22 +157,9 @@ int32_t rand_fp() {
 
 
 Vec3 random_unit_vector() {
-    // Generate a random angle phi
     uint32_t r_val = rand_u32();
-    int lut_idx = r_val % ANGLE_LUT_SIZE;
-    int32_t cos_phi = g_cos_lut[lut_idx];
-    int32_t sin_phi = g_sin_lut[lut_idx];
-
-    // Generate a random z-coordinate (cos_theta)
-    int32_t cos_theta = (2 * rand_fp()) - ONE; // Uniform in [-1, 1]
-    int32_t sin_theta = sqrt_fp(ONE - mul(cos_theta, cos_theta));
-
-    // Construct the unit vector
-    Vec3 p;
-    p.x = mul(sin_theta, cos_phi);
-    p.y = mul(sin_theta, sin_phi);
-    p.z = cos_theta;
-    return p;
+    int lut_idx = r_val % UNIT_VECTOR_LUT_SIZE;
+    return g_unit_vector_lut[lut_idx];
 }
 
 // Forward declarations
@@ -225,11 +227,15 @@ int32_t intersect_sphere(Ray r, Sphere s) {
     int32_t discriminant = mul(b, b) - 4 * mul(a, c);
     if (discriminant < 0) return F(1e9);
     
-    int32_t t = div_fp(-b - sqrt_fp(discriminant), 2 * a);
+    int32_t sqrt_d = sqrt_fp(discriminant);
+    // Pre-calculate inverse of denominator to replace two divisions with one.
+    int32_t inv_2a = div_fp(ONE, 2 * a);
+
+    int32_t t = mul(-b - sqrt_d, inv_2a);
     if (t > F(0.001)) return t;
     
-    t = div_fp(-b + sqrt_fp(discriminant), 2 * a);
-    if (t > F(0.001)) return t;
+    int32_t t2 = mul(-b + sqrt_d, inv_2a);
+    if (t2 > F(0.001)) return t2;
     
     return F(1e9);
 }
