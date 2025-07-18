@@ -11,20 +11,27 @@
 #define SAMPLES_PER_PIXEL 32
 #define MAX_BOUNCES 3
 #define FOV 60.0
+#define LIGHT_INTENSITY 2.0
 
 // Scene dimensions
 #define NUM_SPHERES 2
 #define NUM_PLANES 6
 
-// Fixed-point math settings
-#define FRAC_BITS 16
+// Fixed-point math settings — 16-bit total (4 integer + 12 fractional)
+typedef int16_t fp_t;
+#define FRAC_BITS 12
 #define ONE (1 << FRAC_BITS)
-#define F(x) ((int32_t)((x) * ONE))
+// Convert a floating-point value to 4.12 fixed-point (rounded)
+#define F(x) ((fp_t)((x) * ONE + ((x) >= 0 ? 0.5f : -0.5f)))
 #define I(x) ((x) >> FRAC_BITS)
+
+// Handy constants
+#define FP_EPS ((fp_t)1)             // ≈ 0.00024 in real units
+#define FP_INF 0x7FFFFFFF            // Large “infinite” distance sentinel
 
 // Simple vector struct
 typedef struct {
-    int32_t x, y, z;
+    fp_t x, y, z;
 } Vec3;
 
 // Ray
@@ -41,58 +48,92 @@ typedef struct {
 // Sphere
 typedef struct {
     Vec3 center;
-    int32_t radius;
+    fp_t radius;
     Material material;
 } Sphere;
 
 // Plane
 typedef struct {
     Vec3 normal;
-    int32_t dist;
+    fp_t dist;
     Material material;
 } Plane;
 
 // Structure to hold intersection results
 typedef struct {
-    int32_t t;
+    int32_t t;            // keep 32-bit for extra head-room during comparisons
     int hit_type; // 0 for sphere, 1 for plane
     int hit_index;
     int hit;      // 1 if an object was hit, 0 otherwise
 } Intersection;
 
-#define UNIT_VECTOR_LUT_SIZE 64
+#define UNIT_VECTOR_LUT_SIZE 128
+// 64 pre-computed unit vectors stored at 8.8 precision; they will be left-shifted
+// at runtime to 4.12 to keep the table small and readable.
 static const Vec3 g_unit_vector_lut[UNIT_VECTOR_LUT_SIZE] = {
-    {.x = 37813, .y = 37813, .z = 37813}, {.x = -37813, .y = -37813, .z = -37813},
-    {.x = 53475, .y = 0, .z = 37813}, {.x = -53475, .y = 0, .z = -37813},
-    {.x = 0, .y = 53475, .z = 37813}, {.x = 0, .y = -53475, .z = -37813},
-    {.x = 37813, .y = 53475, .z = 0}, {.x = -37813, .y = -53475, .z = 0},
-    {.x = 65536, .y = 0, .z = 0}, {.x = -65536, .y = 0, .z = 0},
-    {.x = 0, .y = 65536, .z = 0}, {.x = 0, .y = -65536, .z = 0},
-    {.x = 0, .y = 0, .z = 65536}, {.x = 0, .y = 0, .z = -65536},
-    {.x = 46340, .y = 46340, .z = 0}, {.x = -46340, .y = -46340, .z = 0},
-    {.x = 46340, .y = 0, .z = 46340}, {.x = -46340, .y = 0, .z = -46340},
-    {.x = 0, .y = 46340, .z = 46340}, {.x = 0, .y = -46340, .z = -46340},
-    {.x = 25881, .y = 25881, .z = 57925}, {.x = -25881, .y = -25881, .z = -57925},
-    {.x = 25881, .y = 57925, .z = 25881}, {.x = -25881, .y = -57925, .z = -25881},
-    {.x = 57925, .y = 25881, .z = 25881}, {.x = -57925, .y = -25881, .z = -25881},
-    {.x = 32768, .y = 32768, .z = 46340}, {.x = -32768, .y = -32768, .z = -46340},
-    {.x = 32768, .y = 46340, .z = 32768}, {.x = -32768, .y = -46340, .z = -32768},
-    {.x = 46340, .y = 32768, .z = 32768}, {.x = -46340, .y = -32768, .z = -32768},
-    {.x = 12345, .y = 64543, .z = 10000}, {.x = -12345, .y = -64543, .z = -10000},
-    {.x = 64543, .y = 10000, .z = 12345}, {.x = -64543, .y = -10000, .z = -12345},
-    {.x = 10000, .y = 12345, .z = 64543}, {.x = -10000, .y = -12345, .z = -64543},
-    {.x = 40000, .y = 50000, .z = 1234}, {.x = -40000, .y = -50000, .z = -1234},
-    {.x = 50000, .y = 1234, .z = 40000}, {.x = -50000, .y = -1234, .z = -40000},
-    {.x = 1234, .y = 40000, .z = 50000}, {.x = -1234, .y = -40000, .z = -50000},
-    {.x = 18000, .y = 18000, .z = 60963}, {.x = -18000, .y = -18000, .z = -60963},
-    {.x = 18000, .y = 60963, .z = 18000}, {.x = -18000, .y = -60963, .z = -18000},
-    {.x = 60963, .y = 18000, .z = 18000}, {.x = -60963, .y = -18000, .z = -18000},
-    {.x = 55555, .y = 22222, .z = 25000}, {.x = -55555, .y = -22222, .z = -25000},
-    {.x = 22222, .y = 25000, .z = 55555}, {.x = -22222, .y = -25000, .z = -55555},
-    {.x = 25000, .y = 55555, .z = 22222}, {.x = -25000, .y = -55555, .z = -22222},
-    {.x = 61234, .y = 12345, .z = 20000}, {.x = -61234, .y = -12345, .z = -20000},
-    {.x = 12345, .y = 20000, .z = 61234}, {.x = -12345, .y = -20000, .z = -61234},
-    {.x = 20000, .y = 61234, .z = 12345}, {.x = -20000, .y = -61234, .z = -12345}
+    {.x = 148,  .y = 148,  .z = 148 }, {.x = -148, .y = -148, .z = -148},
+    {.x = 210,  .y = 0,    .z = 148 }, {.x = -210, .y = 0,    .z = -148},
+    {.x = 0,    .y = 210,  .z = 148 }, {.x = 0,    .y = -210, .z = -148},
+    {.x = 148,  .y = 210,  .z = 0   }, {.x = -148, .y = -210, .z = 0   },
+    {.x = 256,  .y = 0,    .z = 0   }, {.x = -256, .y = 0,    .z = 0   },
+    {.x = 0,    .y = 256,  .z = 0   }, {.x = 0,    .y = -256, .z = 0   },
+    {.x = 0,    .y = 0,    .z = 256 }, {.x = 0,    .y = 0,    .z = -256},
+    {.x = 182,  .y = 182,  .z = 0   }, {.x = -182, .y = -182, .z = 0   },
+    {.x = 182,  .y = 0,    .z = 182 }, {.x = -182, .y = 0,    .z = -182},
+    {.x = 0,    .y = 182,  .z = 182 }, {.x = 0,    .y = -182, .z = -182},
+    {.x = 102,  .y = 102,  .z = 226 }, {.x = -102, .y = -102, .z = -226},
+    {.x = 102,  .y = 226,  .z = 102 }, {.x = -102, .y = -226, .z = -102},
+    {.x = 226,  .y = 102,  .z = 102 }, {.x = -226, .y = -102, .z = -102},
+    {.x = 128,  .y = 128,  .z = 182 }, {.x = -128, .y = -128, .z = -182},
+    {.x = 128,  .y = 182,  .z = 128 }, {.x = -128, .y = -182, .z = -128},
+    {.x = 182,  .y = 128,  .z = 128 }, {.x = -182, .y = -128, .z = -128},
+    {.x =  48,  .y = 252,  .z =  39 }, {.x =  -48, .y = -252, .z =  -39},
+    {.x = 252,  .y =  39,  .z =  48 }, {.x = -252, .y =  -39, .z =  -48},
+    {.x =  39,  .y =  48,  .z = 252 }, {.x =  -39, .y =  -48, .z = -252},
+    {.x = 156,  .y = 195,  .z =   5 }, {.x = -156, .y = -195, .z =   -5},
+    {.x = 195,  .y =   5,  .z = 156 }, {.x = -195, .y =   -5, .z = -156},
+    {.x =   5,  .y = 156,  .z = 195 }, {.x =   -5, .y = -156, .z = -195},
+    {.x =  70,  .y =  70,  .z = 238 }, {.x =  -70, .y =  -70, .z = -238},
+    {.x =  70,  .y = 238,  .z =  70 }, {.x =  -70, .y = -238, .z =  -70},
+    {.x = 238,  .y =  70,  .z =  70 }, {.x = -238, .y =  -70, .z =  -70},
+    {.x = 217,  .y =  86,  .z =  98 }, {.x = -217, .y =  -86, .z =  -98},
+    {.x =  86,  .y =  98,  .z = 217 }, {.x =  -86, .y =  -98, .z = -217},
+    {.x =  98,  .y = 217,  .z =  86 }, {.x =  -98, .y = -217, .z =  -86},
+    {.x = 239,  .y =  48,  .z =  78 }, {.x = -239, .y =  -48, .z =  -78},
+    {.x =  48,  .y =  78,  .z = 239 }, {.x =  -48, .y =  -78, .z = -239},
+    {.x =  78,  .y = 239,  .z =  48 }, {.x =  -78, .y = -239, .z =  -48},
+    // ---- new unique random vectors (entries 64-127) ----
+    {.x = 180, .y =  34, .z = 193}, {.x = -180, .y =  34, .z = -193},
+    {.x =  34, .y = 193, .z = 180}, {.x =  -34, .y = -193, .z = -180},
+    {.x = 193, .y = 180, .z =  34}, {.x = -193, .y = -180, .z =  -34},
+    {.x =  45, .y = 210, .z = 160}, {.x =  -45, .y = -210, .z = -160},
+    {.x = 210, .y = 160, .z =  45}, {.x = -210, .y = -160, .z =  -45},
+    {.x = 160, .y =  45, .z = 210}, {.x = -160, .y =  -45, .z = -210},
+    {.x = 125, .y = 230, .z =  70}, {.x = -125, .y = -230, .z =  -70},
+    {.x = 230, .y =  70, .z = 125}, {.x = -230, .y =  -70, .z = -125},
+    {.x =  70, .y = 125, .z = 230}, {.x =  -70, .y = -125, .z = -230},
+    {.x = 190, .y = 200, .z =  20}, {.x = -190, .y = -200, .z =  -20},
+    {.x = 200, .y =  20, .z = 190}, {.x = -200, .y =  -20, .z = -190},
+    {.x =  20, .y = 190, .z = 200}, {.x =  -20, .y = -190, .z = -200},
+    {.x =  95, .y = 215, .z = 140}, {.x =  -95, .y = -215, .z = -140},
+    {.x = 215, .y = 140, .z =  95}, {.x = -215, .y = -140, .z =  -95},
+    {.x = 140, .y =  95, .z = 215}, {.x = -140, .y =  -95, .z = -215},
+    {.x =  60, .y = 180, .z = 230}, {.x =  -60, .y = -180, .z = -230},
+    {.x = 180, .y = 230, .z =  60}, {.x = -180, .y = -230, .z =  -60},
+    {.x = 230, .y =  60, .z = 180}, {.x = -230, .y =  -60, .z = -180},
+    {.x = 130, .y = 200, .z = 150}, {.x = -130, .y = -200, .z = -150},
+    {.x = 200, .y = 150, .z = 130}, {.x = -200, .y = -150, .z = -130},
+    {.x = 150, .y = 130, .z = 200}, {.x = -150, .y = -130, .z = -200},
+    {.x =  85, .y = 145, .z = 240}, {.x =  -85, .y = -145, .z = -240},
+    {.x = 145, .y = 240, .z =  85}, {.x = -145, .y = -240, .z =  -85},
+    {.x = 240, .y =  85, .z = 145}, {.x = -240, .y =  -85, .z = -145},
+    {.x = 170, .y = 100, .z = 220}, {.x = -170, .y = -100, .z = -220},
+    {.x = 100, .y = 220, .z = 170}, {.x = -100, .y = -220, .z = -170},
+    {.x = 220, .y = 170, .z = 100}, {.x = -220, .y = -170, .z = -100},
+    {.x =  66, .y = 210, .z = 195}, {.x =  -66, .y = -210, .z = -195},
+    {.x = 210, .y = 195, .z =  66}, {.x = -210, .y = -195, .z =  -66},
+    {.x = 195, .y =  66, .z = 210}, {.x = -195, .y =  -66, .z = -210},
+    {.x = 110, .y = 180, .z = 210}, {.x = -110, .y = -180, .z = -210}
 };
 
 static const Sphere g_spheres[NUM_SPHERES] = {
@@ -103,7 +144,7 @@ static const Sphere g_spheres[NUM_SPHERES] = {
 static const Plane g_planes[NUM_PLANES] = {
     {.normal = {.x = F(0), .y = F(1), .z = F(0)}, .dist = F(-1), .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},   // Floor
     // Emissive light panel – slightly below the ceiling so the ceiling itself can receive light
-    {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-2.99), .material = {.color = {.x = F(32.0), .y = F(32.0), .z = F(32.0)}, .is_light = 1}},
+    {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-2.99), .material = {.color = {.x = F(LIGHT_INTENSITY), .y = F(LIGHT_INTENSITY), .z = F(LIGHT_INTENSITY)}, .is_light = 1}},
     // Actual ceiling (non-emissive)
     {.normal = {.x = F(0), .y = F(-1), .z = F(0)}, .dist = F(-3), .material = {.color = {.x = F(0.75), .y = F(0.75), .z = F(0.75)}, .is_light = 0}},
     {.normal = {.x = F(1), .y = F(0), .z = F(0)}, .dist = F(-2), .material = {.color = {.x = F(0.75), .y = F(0.25), .z = F(0.25)}, .is_light = 0}},         // Left wall (red)
@@ -112,8 +153,9 @@ static const Plane g_planes[NUM_PLANES] = {
 };
 
 // Fixed-point multiplication
-int32_t mul(int32_t a, int32_t b) {
-    return (int32_t)(((int64_t)a * b) >> FRAC_BITS);
+// 8.8 fixed-point multiply (fp_t × fp_t → 32-bit)
+static inline int32_t mul(int32_t a, int32_t b) {
+    return (int32_t)(((int64_t)a * (int64_t)b) >> FRAC_BITS);
 }
 
 // Fixed-point division
@@ -159,7 +201,11 @@ int32_t rand_fp() {
 Vec3 random_unit_vector() {
     uint32_t r_val = rand_u32();
     int lut_idx = r_val % UNIT_VECTOR_LUT_SIZE;
-    return g_unit_vector_lut[lut_idx];
+    Vec3 base = g_unit_vector_lut[lut_idx];
+    // Convert from 8.8 → 4.12 by left-shifting 4 bits.
+    return (Vec3){ (fp_t)(base.x << (FRAC_BITS - 8)),
+                   (fp_t)(base.y << (FRAC_BITS - 8)),
+                   (fp_t)(base.z << (FRAC_BITS - 8)) };
 }
 
 // Forward declarations
@@ -174,8 +220,11 @@ Vec3 trace_path(Ray r);
 Vec3 vec_add(Vec3 a, Vec3 b) { return (Vec3){a.x + b.x, a.y + b.y, a.z + b.z}; }
 Vec3 vec_sub(Vec3 a, Vec3 b) { return (Vec3){a.x - b.x, a.y - b.y, a.z - b.z}; }
 int32_t vec_dot(Vec3 a, Vec3 b) { return mul(a.x, b.x) + mul(a.y, b.y) + mul(a.z, b.z); }
-Vec3 vec_mul(Vec3 a, Vec3 b) { return (Vec3){mul(a.x, b.x), mul(a.y, b.y), mul(a.z, b.z)}; }
-Vec3 vec_scale(Vec3 v, int32_t s) { return (Vec3){mul(v.x, s), mul(v.y, s), mul(v.z, s)}; }
+Vec3 vec_mul(Vec3 a, Vec3 b) { return (Vec3){ (fp_t)mul(a.x, b.x), (fp_t)mul(a.y, b.y), (fp_t)mul(a.z, b.z)}; }
+Vec3 vec_scale(Vec3 v, int32_t s) {
+    fp_t s_fp = (fp_t)s; // clamp / cast the scalar into fp_t range
+    return (Vec3){ (fp_t)mul(v.x, s_fp), (fp_t)mul(v.y, s_fp), (fp_t)mul(v.z, s_fp)};
+}
 int32_t vec_len_sq(Vec3 v) { return vec_dot(v, v); }
 Vec3 vec_norm(Vec3 v) {
     int32_t len_sq = vec_len_sq(v);
@@ -186,7 +235,7 @@ Vec3 vec_norm(Vec3 v) {
 // Returns an Intersection result.
 Intersection intersect_scene(Ray r) {
     Intersection result;
-    result.t = F(1e9);
+    result.t = FP_INF;
     result.hit_type = -1;
     result.hit_index = -1;
     result.hit = 0;
@@ -225,32 +274,32 @@ int32_t intersect_sphere(Ray r, Sphere s) {
     int32_t b = 2 * vec_dot(oc, r.dir);
     int32_t c = vec_dot(oc, oc) - mul(s.radius, s.radius);
     int32_t discriminant = mul(b, b) - 4 * mul(a, c);
-    if (discriminant < 0) return F(1e9);
+    if (discriminant < 0) return FP_INF;
     
     int32_t sqrt_d = sqrt_fp(discriminant);
-    // Pre-calculate inverse of denominator to replace two divisions with one.
+    // Pre-compute 1/(2a) once.
     int32_t inv_2a = div_fp(ONE, 2 * a);
 
-    int32_t t = mul(-b - sqrt_d, inv_2a);
-    if (t > F(0.001)) return t;
-    
+    int32_t t  = mul(-b - sqrt_d, inv_2a);
+    if (t > FP_EPS) return t;
+
     int32_t t2 = mul(-b + sqrt_d, inv_2a);
-    if (t2 > F(0.001)) return t2;
+    if (t2 > FP_EPS) return t2;
     
-    return F(1e9);
+    return FP_INF;
 }
 
 // Ray-plane intersection
 int32_t intersect_plane(Ray r, Plane p) {
     int32_t denom = vec_dot(p.normal, r.dir);
-    if (denom > -F(0.001) && denom < F(0.001)) return F(1e9); // Parallel
+    if (denom > -FP_EPS && denom < FP_EPS) return FP_INF; // Parallel
     int32_t t = div_fp(vec_dot(p.normal, vec_sub(vec_scale(p.normal, p.dist), r.orig)), denom);
-    if (t <= F(0.001)) return F(1e9);
+    if (t <= FP_EPS) return FP_INF;
 
     if (p.material.is_light) {
         Vec3 hit_pt = vec_add(r.orig, vec_scale(r.dir, t));
         if (!is_on_light(hit_pt)) {
-            return F(1e9);
+            return FP_INF;
         }
     }
 
@@ -300,9 +349,8 @@ Vec3 trace_path(Ray r) {
         }
 
         // Check if it is in a shadow
-        uint32_t r_val = rand_u32();
-        int32_t rand1 = r_val & 0xFFFF;
-        int32_t rand2 = r_val >> 16;
+        int32_t rand1 = rand_fp(); // 0…ONE
+        int32_t rand2 = rand_fp();
         Vec3 light_point = {F(-1.0) + mul(F(2.0), rand1), F(2.99), F(-3.2) + mul(F(0.4), rand2)};
         Vec3 light_vec = vec_sub(light_point, hit_point);
         int32_t dist_sq = vec_len_sq(light_vec);
@@ -312,12 +360,12 @@ Vec3 trace_path(Ray r) {
         int occluded = 0;
         for (size_t i = 0; i < NUM_SPHERES; ++i) {
             int32_t shadow_t = intersect_sphere(shadow_ray, g_spheres[i]);
-            if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
+            if (shadow_t < FP_INF && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
         }
         for (size_t i = 0; i < NUM_PLANES; ++i) {
             if (g_planes[i].material.is_light) continue; // Don't treat the emissive plane as occluder
             int32_t shadow_t = intersect_plane(shadow_ray, g_planes[i]);
-            if (shadow_t < F(1e8) && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
+            if (shadow_t < FP_INF && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
         }
 
         if (!occluded) {
@@ -361,8 +409,7 @@ int is_on_light(Vec3 p) {
     return (p.x >= F(-1.0) && p.x <= F(1.0) && p.z >= F(-3.2) && p.z <= F(-2.8));
 }
 
-
-// EVERYTHING BELOW HERE WILL BE IMPLEMENTED IN THE HOST MACHINE
+#define BRIGHTNESS_SHIFT 4  // final display multiplier (2^n) to compensate for lower 4.12 range
 
 // PPM image output
 void write_ppm(const char *filename, int width, int height, const uint8_t *data) {
@@ -389,7 +436,7 @@ int main() {
         fprintf(stderr, "\rRendering: %3d%%", (y * 100) / (height - 1));
         fflush(stderr);
         for (int x = 0; x < width; ++x) {
-            Vec3 pixel_color = {F(0), F(0), F(0)};
+            int32_t acc_r = 0, acc_g = 0, acc_b = 0; // 32-bit accumulation to prevent overflow
 
             for (int s = 0; s < SAMPLES_PER_PIXEL; ++s) {
                 // Screen coordinates with antialiasing
@@ -404,15 +451,25 @@ int main() {
                 r.dir.y = F(sy_ndc * fov_scale);
                 r.dir = vec_norm(r.dir);
 
-                pixel_color = vec_add(pixel_color, trace_path(r));
+                Vec3 sample_col = trace_path(r);
+                acc_r += sample_col.x;
+                acc_g += sample_col.y;
+                acc_b += sample_col.z;
             }
             
-            Vec3 color = vec_scale(pixel_color, div_fp(ONE, F(SAMPLES_PER_PIXEL)));
+            // Average and convert to 4.12 fixed-point again
+            fp_t color_x = (fp_t)(acc_r / SAMPLES_PER_PIXEL);
+            fp_t color_y = (fp_t)(acc_g / SAMPLES_PER_PIXEL);
+            fp_t color_z = (fp_t)(acc_b / SAMPLES_PER_PIXEL);
 
+            int32_t disp_r = color_x << BRIGHTNESS_SHIFT;
+            int32_t disp_g = color_y << BRIGHTNESS_SHIFT;
+            int32_t disp_b = color_z << BRIGHTNESS_SHIFT;
+ 
             int i = (y * width + x) * 3;
-            int r_val = ((int64_t)color.x * 255) >> FRAC_BITS;
-            int g_val = ((int64_t)color.y * 255) >> FRAC_BITS;
-            int b_val = ((int64_t)color.z * 255) >> FRAC_BITS;
+            int r_val = ((int64_t)disp_r * 255) >> FRAC_BITS;
+            int g_val = ((int64_t)disp_g * 255) >> FRAC_BITS;
+            int b_val = ((int64_t)disp_b * 255) >> FRAC_BITS;
             
             image[i]   = r_val > 255 ? 255 : (r_val < 0 ? 0 : r_val);
             image[i+1] = g_val > 255 ? 255 : (g_val < 0 ? 0 : g_val);
