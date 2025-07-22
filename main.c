@@ -102,7 +102,6 @@ static const Vec3 g_unit_vector_lut[UNIT_VECTOR_LUT_SIZE] = {
     {.x = 239,  .y =  48,  .z =  78 }, {.x = -239, .y =  -48, .z =  -78},
     {.x =  48,  .y =  78,  .z = 239 }, {.x =  -48, .y =  -78, .z = -239},
     {.x =  78,  .y = 239,  .z =  48 }, {.x =  -78, .y = -239, .z =  -48},
-    // ---- new unique random vectors (entries 64-127) ----
     {.x = 180, .y =  34, .z = 193}, {.x = -180, .y =  34, .z = -193},
     {.x =  34, .y = 193, .z = 180}, {.x =  -34, .y = -193, .z = -180},
     {.x = 193, .y = 180, .z =  34}, {.x = -193, .y = -180, .z =  -34},
@@ -360,12 +359,12 @@ Vec3 trace_path(Ray r) {
         int occluded = 0;
         for (size_t i = 0; i < NUM_SPHERES; ++i) {
             int32_t shadow_t = intersect_sphere(shadow_ray, g_spheres[i]);
-            if (shadow_t < FP_INF && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
+            if (shadow_t < FP_INF && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; }
         }
         for (size_t i = 0; i < NUM_PLANES; ++i) {
             if (g_planes[i].material.is_light) continue; // Don't treat the emissive plane as occluder
             int32_t shadow_t = intersect_plane(shadow_ray, g_planes[i]);
-            if (shadow_t < FP_INF && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; break; }
+            if (shadow_t < FP_INF && mul(shadow_t, shadow_t) < dist_sq) { occluded = 1; }
         }
 
         if (!occluded) {
@@ -482,4 +481,4 @@ int main() {
     free(image);
 
     return 0;
-} 
+}
